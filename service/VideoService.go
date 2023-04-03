@@ -137,6 +137,9 @@ func DownloadFile(c *gin.Context) {
 	progress := &ProgressTracker{FileName: fileName, Total: resp.ContentLength}
 	reader := io.TeeReader(resp.Body, progress)
 
+	// 获取响应关闭通知通道
+	closeNotify := c.Writer.CloseNotify()
+
 	go func() {
 		var repeatTimes int = 0
 		var tmpProgress int64
@@ -146,19 +149,49 @@ func DownloadFile(c *gin.Context) {
 				repeatTimes += 1
 				if repeatTimes > 30 {
 					log.Printf("repeatTimes!")
+					resp.Body.Close()
+
+					file.Close()
+
+					// 告诉前端下载失败,并且删除视频文件。
+					err := os.Remove("../VideoDownload/" + fileName)
+					time.Sleep(time.Millisecond * 1300)
+					if err != nil {
+						fmt.Println("删除文件失败:", err)
+						return
+					}
+					for _, val := range ChanMap {
+						progress.Done = true
+						// 检查通道是否已经关闭
+						if val == nil {
+							// 如果通道已经关闭，可以执行相应的处理（例如删除键值对）
+							// delete(service.ChanMap, key)
+							log.Printf("channel is closed!")
+							continue
+						}
+						// 发送消息
+
+						select {
+						case val <- model.WebSocket{
+							Data: "视频文件下载失败：" + fileName,
+							Cmd:  4,
+						}:
+							// log.Print("test")
+							// log.Print(progress)
+							log.Printf("send data to client  -end")
+							// 如果通道没有关闭，则可以向通道发送数据
+						case <-val:
+							log.Printf("Client failed to send -end")
+							// 如果通道已经关闭，则执行特定的操作
+						}
+					}
 					break
 				}
 			}
 
 			tmpProgress = progress.Progress
-			time.Sleep(time.Millisecond * 2000)
-			//for _, val := range ChanMap {
-			//	progress.Done = false
-			//	val <- model.WebSocket{
-			//		Data: progress,
-			//		Cmd:  2,
-			//	}
-			//}
+			time.Sleep(time.Millisecond * 1300)
+
 			for _, val := range ChanMap {
 				progress.Done = false
 				// 检查通道是否已经关闭
@@ -169,7 +202,6 @@ func DownloadFile(c *gin.Context) {
 				}
 
 				// 发送消息
-
 				select {
 				case val <- model.WebSocket{
 					Data: progress,
@@ -180,12 +212,12 @@ func DownloadFile(c *gin.Context) {
 				case <-val:
 					log.Printf("Client failed to send -1")
 					// 如果通道已经关闭，则执行特定的操作
+				case <-closeNotify:
+					// 响应已经关闭，执行相应的处理
+					log.Println("Response closed")
 				}
 			}
-			if progress.Progress < 0 {
-				log.Printf("Progress Number is -1")
-				break
-			}
+
 			if progress.Progress > 0 && progress.Total == progress.Progress {
 				// log.Print(progress)
 				for _, val := range ChanMap {
@@ -197,27 +229,31 @@ func DownloadFile(c *gin.Context) {
 						log.Printf("channel is closed!")
 						continue
 					}
-
 					// 发送消息
-
-					select {
-					case val <- model.WebSocket{
-						Data: progress,
-						Cmd:  2,
-					}:
-						// log.Print("test")
-						// log.Print(progress)
-						log.Printf("send data to client  -end")
-						// 如果通道没有关闭，则可以向通道发送数据
-					case <-val:
-						log.Printf("Client failed to send -end")
-						// 如果通道已经关闭，则执行特定的操作
+					for {
+						select {
+						case val <- model.WebSocket{
+							Data: progress,
+							Cmd:  2,
+						}:
+							// log.Print("test")
+							// log.Print(progress)
+							log.Printf("send data to client")
+							return
+							// 如果通道没有关闭，则可以向通道发送数据
+						case <-val:
+							log.Printf("Client failed to send -end")
+							// 如果通道已经关闭，则执行特定的操作
+						}
 					}
+				}
+				if progress.Progress < 0 {
+					log.Printf("Progress Number is -1")
+					break
 				}
 				break
 			}
 		}
-
 	}()
 	// 使用 io.Copy() 函数将文件内容写入磁盘
 	io.Copy(file, reader)
@@ -331,29 +367,60 @@ func TimedVideoTask(c *gin.Context) {
 
 				for _, v := range DevCache.Items() {
 					go func(v cache.Item) {
-						fmt.Println(v.Object.(model.DeviceReportInfo).GoProIP)
-						ip := v.Object.(model.DeviceReportInfo).GoProIP
-						client := &http.Client{}
-						//设置usb可以控制
-						// 发送第一个HTTP GET请求
-						resp, err := client.Get("http://" + ip + ":8080/gopro/camera/control/wired_usb?p=1")
-						if err != nil {
-							log.Printf("resp: %+v", resp)
-							log.Printf("Error occurred: %+v", err)
-						}
-						//设置usb设置为录制视频的窗口
-						// 发送第二个HTTP GET请求
-						resp, err = client.Get("http://" + ip + ":8080/gopro/camera/presets/set_group?id=1000")
-						if err != nil {
-							log.Printf("resp: %+v", resp)
-							log.Printf("Error occurred: %+v", err)
-						}
-						//设置usb开启录制视频
-						// 发送第三个HTTP GET请求
-						resp, err = client.Get("http://" + ip + ":8080/gopro/camera/shutter/start")
+						for i := 0; i < 3; i++ {
+							fmt.Println(v.Object.(model.DeviceReportInfo).GoProIP)
+							ip := v.Object.(model.DeviceReportInfo).GoProIP
+							client := &http.Client{}
+							//设置usb可以控制
+							// 发送第一个HTTP GET请求
+							resp, err := client.Get("http://" + ip + ":8080/gopro/camera/control/wired_usb?p=1")
+							if err != nil {
+								for _, val := range ChanMap {
+									// progress.Done = true
+									// 检查通道是否已经关闭
+									if val == nil {
+										// 如果通道已经关闭，可以执行相应的处理（例如删除键值对）
+										//delete(service.ChanMap, key)
+										log.Printf("channel is closed!")
+										continue
+									}
+									// 发送消息
 
-						if err != nil {
-							log.Printf("Error occurred: %+v", err)
+									select {
+									case val <- model.WebSocket{
+										Data: fmt.Sprintf("相机:%s,开始定时录制失败,重试第%v次", ip, i+1),
+										Cmd:  4,
+									}:
+										// log.Print("test")
+										// log.Print(progress)
+										log.Printf("send data to client  -end")
+										// 如果通道没有关闭，则可以向通道发送数据
+									case <-val:
+										log.Printf("Client failed to send -end")
+										// 如果通道已经关闭，则执行特定的操作
+									}
+								}
+								log.Printf("resp: %+v", resp)
+								log.Printf("Error occurred: %+v", err)
+								continue
+							}
+							//设置usb设置为录制视频的窗口
+							// 发送第二个HTTP GET请求
+							resp, err = client.Get("http://" + ip + ":8080/gopro/camera/presets/set_group?id=1000")
+							if err != nil {
+								log.Printf("resp: %+v", resp)
+								log.Printf("Error occurred: %+v", err)
+								continue
+							}
+							//设置usb开启录制视频
+							// 发送第三个HTTP GET请求
+							resp, err = client.Get("http://" + ip + ":8080/gopro/camera/shutter/start")
+							if err != nil {
+								log.Printf("Error occurred: %+v", err)
+
+								continue
+							}
+							break
 						}
 					}(v)
 
@@ -397,28 +464,60 @@ func TimedVideoTask(c *gin.Context) {
 				log.Printf("Stop recording video")
 				for _, v := range DevCache.Items() {
 					go func(v cache.Item) {
-						fmt.Println(v.Object.(model.DeviceReportInfo).GoProIP)
-						ip := v.Object.(model.DeviceReportInfo).GoProIP
-						client := &http.Client{}
-						//设置usb可以控制
-						// 发送第一个HTTP GET请求
-						resp, err := client.Get("http://" + ip + ":8080/gopro/camera/control/wired_usb?p=1")
-						if err != nil {
-							log.Printf("Error occurred: %+v", resp)
-							log.Printf("Error occurred: %+v", err)
-						}
-						//设置usb设置为录制视频的窗口
-						// 发送第二个HTTP GET请求
-						resp, err = client.Get("http://" + ip + ":8080/gopro/camera/presets/set_group?id=1000")
-						if err != nil {
-							log.Printf("Error occurred: %+v", resp)
-							log.Printf("Error occurred: %+v", err)
-						}
-						//设置usb开启录制视频
-						// 发送第三个HTTP GET请求
-						resp, err = client.Get("http://" + ip + ":8080/gopro/camera/shutter/stop")
-						if err != nil {
-							log.Printf("Error occurred: %+v", err)
+						for i := 0; i < 3; i++ {
+							fmt.Println(v.Object.(model.DeviceReportInfo).GoProIP)
+							ip := v.Object.(model.DeviceReportInfo).GoProIP
+							client := &http.Client{}
+							//设置usb可以控制
+							// 发送第一个HTTP GET请求
+							resp, err := client.Get("http://" + ip + ":8080/gopro/camera/control/wired_usb?p=1")
+							if err != nil {
+								for _, val := range ChanMap {
+									// progress.Done = true
+									// 检查通道是否已经关闭
+									if val == nil {
+										// 如果通道已经关闭，可以执行相应的处理（例如删除键值对）
+										//delete(service.ChanMap, key)
+										log.Printf("channel is closed!")
+										continue
+									}
+									// 发送消息
+
+									select {
+									case val <- model.WebSocket{
+										Data: fmt.Sprintf("相机:%s,结束定时录制失败,重试第%v次", ip, i+1),
+										Cmd:  4,
+									}:
+										// log.Print("test")
+										// log.Print(progress)
+										log.Printf("send data to client  -end")
+										// 如果通道没有关闭，则可以向通道发送数据
+									case <-val:
+										log.Printf("Client failed to send -end")
+										// 如果通道已经关闭，则执行特定的操作
+									}
+								}
+								log.Printf("Error occurred: %+v", resp)
+								log.Printf("Error occurred: %+v", err)
+								continue
+							}
+							//设置usb设置为录制视频的窗口
+							// 发送第二个HTTP GET请求
+							resp, err = client.Get("http://" + ip + ":8080/gopro/camera/presets/set_group?id=1000")
+							if err != nil {
+								log.Printf("Error occurred: %+v", resp)
+								log.Printf("Error occurred: %+v", err)
+								continue
+							}
+							//设置usb开启录制视频
+							// 发送第三个HTTP GET请求
+							resp, err = client.Get("http://" + ip + ":8080/gopro/camera/shutter/stop")
+							if err != nil {
+								log.Printf("Error occurred: %+v", err)
+
+								continue
+							}
+							break
 						}
 					}(v)
 

@@ -2,10 +2,12 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"gin-go/model"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -153,12 +155,29 @@ func SetDeviceTimeSYNC(c *gin.Context) {
 	// 从 map 中获取客户端对应的通道
 	ch := DevClients[addr]
 	// 将字符串发送到通道
+
+	for _, v := range DevCache.Items() {
+		deviceReport := v.Object.(model.DeviceReportInfo)
+		if strings.Split(deviceReport.DeviceIp, ":")[0] == addr {
+			client := &http.Client{}
+			// deviceReport.UTCtime[0] = 2023
+
+			resp, err := client.Get(fmt.Sprintf("http://%s:8080/gopro/camera/set_date_time?date=%v_%v_%v&time=%v_%v_%v", deviceReport.GoProIP, deviceReport.UTCtime[0], deviceReport.UTCtime[1], deviceReport.UTCtime[2], deviceReport.UTCtime[3], deviceReport.UTCtime[4], deviceReport.UTCtime[5]))
+			// fmt.Printf("http://%s:8080/gopro/camera/set_date_time?date=%v_%v_%v&time=%v_%v_%v", deviceReport.GoProIP, deviceReport.UTCtime[0], deviceReport.UTCtime[1], deviceReport.UTCtime[2], deviceReport.UTCtime[3], deviceReport.UTCtime[4], deviceReport.UTCtime[5])
+			if err != nil {
+				log.Printf("resp: %+v", resp)
+				log.Printf("Error occurred: %+v", err)
+				continue
+			}
+			defer resp.Body.Close()
+			defer client.CloseIdleConnections()
+		}
+	}
 	ch <- []byte{0xAA, 0x55, 0x00, 0xff, 0xF2, 0x00, 0x00, 0x00}
 }
 
 func DeviceControlWebcamStart(c *gin.Context) {
 	// 发送第一个HTTP GET请求
-
 	addr := c.Query("device_ip")
 	goproIP := c.Query("gopro_ip")
 	// 从 map 中获取客户端对应的通道
@@ -167,8 +186,10 @@ func DeviceControlWebcamStart(c *gin.Context) {
 	resp, err := client.Get("http://" + goproIP + ":8080/gopro/camera/control/wired_usb?p=0")
 	if err != nil {
 		log.Printf("Error occurred: %+v", resp)
+
 		log.Printf("Error occurred: %+v", err)
 	}
+
 	// 将字符串发送到通道
 	ch <- []byte{0xAA, 0x55, 0x00, 0xff, 0xF3, 0x00, 0x00, 0x00}
 
@@ -186,6 +207,7 @@ func DeviceControlWebcamStop(c *gin.Context) {
 		log.Printf("Error occurred: %+v", resp)
 		log.Printf("Error occurred: %+v", err)
 	}
+
 	// 将字符串发送到通道
 	ch <- []byte{0xAA, 0x55, 0x00, 0xff, 0xF4, 0x00, 0x00, 0x00}
 
